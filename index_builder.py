@@ -1,5 +1,4 @@
 """Index construction utilities for Milestone 1."""
-
 from __future__ import annotations
 
 import json
@@ -11,11 +10,9 @@ from typing import Dict, Iterable, Iterator
 
 from parser import DocumentParser
 
-
 @dataclass
 class Posting:
     """Represents an occurrence of a token within a document."""
-
     doc_id: int
     weighted_tf: float
     raw_tf: int
@@ -94,27 +91,6 @@ class IndexBuilder:
         Each domain folder contains multiple JSON files (one per web page).
         Processes all folders in the corpus.
         """
-        # Check if the path exists
-        if not self.corpus_root.exists():
-            print(f"ERROR: Path does not exist: {self.corpus_root}")
-            print(f"  Make sure you've extracted the zip file first!")
-            print(f"  The path should point to the DEV folder (not the zip file)")
-            return
-        
-        # Check if it's a directory
-        if not self.corpus_root.is_dir():
-            print(f"ERROR: Path is not a directory: {self.corpus_root}")
-            print(f"  Make sure you've extracted the zip file first!")
-            print(f"  The path should point to the DEV folder (not the zip file)")
-            return
-        
-        # Check if path contains ".zip" (might be trying to access zip file directly)
-        if ".zip" in str(self.corpus_root):
-            print(f"WARNING: Path contains '.zip': {self.corpus_root}")
-            print(f"  You cannot access files inside a zip file directly.")
-            print(f"  Please extract the zip file first, then point to the extracted DEV folder.")
-            print(f"  Example: Extract developer.zip, then use: C:\\path\\to\\developer\\DEV")
-        
         # Get all immediate subdirectories (domain folders like aiclub_ics_uci_edu)
         domain_folders = []
         try:
@@ -127,15 +103,6 @@ class IndexBuilder:
         except OSError as e:
             print(f"ERROR: Cannot access directory: {self.corpus_root}")
             print(f"  Error: {e}")
-            return
-        
-        if not domain_folders:
-            print(f"ERROR: No domain folders found in {self.corpus_root}")
-            print(f"  Expected structure: DEV/domain_folder/*.json")
-            print(f"  Make sure:")
-            print(f"    1. You've extracted the zip file")
-            print(f"    2. The path points to the DEV folder containing domain folders")
-            print(f"    3. The DEV folder contains subdirectories (like aiclub_ics_uci_edu/)")
             return
         
         # Sort for consistent ordering
@@ -194,7 +161,6 @@ class IndexBuilder:
                 # Calculate doc_freq: number of unique documents containing this term
                 doc_freq = len(postings)
                 
-                # Write postings as JSON (human-readable format)
                 # Format: [{"doc_id": 0, "weighted_tf": 2.5, "raw_tf": 3}, ...]
                 postings_data = [
                     {
@@ -220,7 +186,7 @@ class IndexBuilder:
 
     def _write_metadata(self) -> None:
         lexicon_path = self.output_dir / "lexicon.jsonl"
-        postings_path = self.output_dir / "postings.jsonl"  # Changed to JSONL
+        postings_path = self.output_dir / "postings.jsonl"
         doc_lookup_path = self.output_dir / "doc_lookup.json"
         doc_lengths_path = self.output_dir / "doc_lengths.json"
         stats_path = self.output_dir / "stats.json"
