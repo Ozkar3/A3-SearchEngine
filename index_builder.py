@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import math
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator
+from typing import Dict, Iterable, Iterator, Set
 
 from parser import DocumentParser
 
@@ -33,6 +34,17 @@ class IndexBuilder:
         self.doc_seen_urls: Dict[str, int] = {}
         self._postings: Dict[str, list[Posting]] = defaultdict(list)
 
+        # Deduplication helpers
+        # Map content hash -> representative doc_id for exact duplicate detection
+        self._content_hash_to_doc_id: Dict[str, int] = {}
+        # Map doc_id -> set of tokens for near-duplicate detection
+        self._doc_tokens: Dict[int, Set[str]] = {}
+        # Statistics for reporting
+        self._exact_duplicate_count: int = 0
+        self._near_duplicate_count: int = 0
+        # Jaccard similarity threshold for near-duplicates
+        self._near_duplicate_threshold: float = 0.9
+
     def build(self) -> None:
         """Build the on-disk inverted index."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,9 +70,45 @@ class IndexBuilder:
                 files_skipped += 1
                 continue  # skip duplicates that share a URL
 
+            # ---------- Exact duplicate detection (content-based) ----------
+            # Hash the raw HTML content; if we've seen this exact content before,
+            # treat this page as an exact duplicate and skip it.
+            content_hash = hashlib.md5(html.encode("utf-8", errors="ignore")).hexdigest()
+            if content_hash in self._content_hash_to_doc_id:
+                self._exact_duplicate_count += 1
+                files_skipped += 1
+                continue
+
+            # Parse and extract token statistics once (used for both indexing
+            # and near-duplicate detection).
+            token_stats = self.parser.parse(html)
+            tokens: Set[str] = set(token_stats.keys())
+
+            # ---------- Near-duplicate detection (token-based Jaccard) ----------
+            # Compare this document's token set against already-indexed docs.
+            # If Jaccard similarity is very high, treat it as a near-duplicate.
+            is_near_duplicate = False
+            if tokens:
+                for existing_tokens in self._doc_tokens.values():
+                    if not existing_tokens:
+                        continue
+                    intersection_size = len(tokens & existing_tokens)
+                    union_size = len(tokens | existing_tokens)
+                    if union_size == 0:
+                        continue
+                    jaccard = intersection_size / union_size
+                    if jaccard >= self._near_duplicate_threshold:
+                        is_near_duplicate = True
+                        break
+
+            if is_near_duplicate:
+                self._near_duplicate_count += 1
+                files_skipped += 1
+                continue
+
+            # At this point, the document is unique enough to index.
             self.doc_lookup[doc_id] = url
             self.doc_seen_urls[url] = doc_id
-            token_stats = self.parser.parse(html)
 
             length = 0.0
             for term, stats in token_stats.items():
@@ -76,9 +124,20 @@ class IndexBuilder:
                 length += term_tf * term_tf
 
             self.doc_lengths[doc_id] = max(length, 1e-9)
+
+            # Record deduplication metadata only for documents we actually index.
+            self._content_hash_to_doc_id[content_hash] = doc_id
+            self._doc_tokens[doc_id] = tokens
             doc_id += 1
 
-        print(f"  Completed processing: {files_processed} files processed, {doc_id} documents indexed, {files_skipped} skipped")
+        print(
+            "  Completed processing: "
+            f"{files_processed} files processed, "
+            f"{doc_id} documents indexed, "
+            f"{files_skipped} skipped "
+            f"({self._exact_duplicate_count} exact duplicates, "
+            f"{self._near_duplicate_count} near-duplicates)"
+        )
         print("  Writing index...")
         self._write_index()
         print("  Writing metadata...")
