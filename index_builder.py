@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import math
 from collections import defaultdict
 from dataclasses import dataclass
@@ -32,16 +33,28 @@ class IndexBuilder:
         self.doc_lengths: Dict[int, float] = {}
         self.doc_seen_urls: Dict[str, int] = {}
         self._postings: Dict[str, list[Posting]] = defaultdict(list)
+        self.partial_index_count = 0    # Counter used keep track on when to dump built index to disk before it gets too big in RAM
 
     def build(self) -> None:
-        """Build the on-disk inverted index."""
+        """Build the on-disk inverted index using partial dums to save memory."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
         doc_id = 0
         files_processed = 0
         files_skipped = 0
 
+        MEMORY_THRESHOLD = 5000
+        # FOR DEBUGGING; BUILDS SMALL INDEX INSTEAD OF ALL =======
+        # MEMORY_THRESHOLD = 100
+        # DEBUG_LIMIT = 1000
+        #======================
+
         print("Building index...")
         for file_path in self._iter_corpus_files():
+            # === DEBUGGING DELETE LATER ===
+            # if files_processed >= DEBUG_LIMIT:
+            #     print(f"DEBUG: Reached {DEBUG_LIMIT} files. Stopping early.")
+            #     break
+            # ========================
             files_processed += 1
             if files_processed % 100 == 0:
                 print(f"  Processed {files_processed} files, indexed {doc_id} documents...")
@@ -77,10 +90,24 @@ class IndexBuilder:
 
             self.doc_lengths[doc_id] = max(length, 1e-9)
             doc_id += 1
+            
+            # Everytime its hits a multiple of the threshold it dumps the current index to disk to save memory
+            if doc_id % MEMORY_THRESHOLD == 0:
+                self._dump_partial_index()
+
+        print("===== Partial indexing COMPLETE =====")
+        print(f"      Created {self.partial_index_count} partial index files.")
+        self._merge_partial_indexes()
 
         print(f"  Completed processing: {files_processed} files processed, {doc_id} documents indexed, {files_skipped} skipped")
-        print("  Writing index...")
-        self._write_index()
+        
+        ''' 
+        _dump_partial_index replaces write_index 
+        its used to implement partial index vs having the whole index in RAM
+          '''
+        #print("  Writing index...")
+        # self._write_index()
+        
         print("  Writing metadata...")
         self._write_metadata()
 
@@ -143,46 +170,50 @@ class IndexBuilder:
         except (json.JSONDecodeError, OSError):
             return None
 
-    def _write_index(self) -> None:
-        """Write the inverted index directly from in-memory postings."""
-        lexicon_path = self.output_dir / "lexicon.jsonl"
-        postings_path = self.output_dir / "postings.jsonl"
+    ''' 
+        _dump_partial_index replaces write_index 
+        its used to implement partial index vs having the whole index in RAM
+    '''
+    # def _write_index(self) -> None:
+    #     """Write the inverted index directly from in-memory postings."""
+    #     lexicon_path = self.output_dir / "lexicon.jsonl"
+    #     postings_path = self.output_dir / "postings.jsonl"
 
-        with open(lexicon_path, "w", encoding="utf-8") as lexicon_file, open(
-            postings_path, "w", encoding="utf-8"
-        ) as postings_file:
-            # Sort terms alphabetically for consistent ordering
-            for term in sorted(self._postings.keys()):
-                postings = self._postings[term]
+    #     with open(lexicon_path, "w", encoding="utf-8") as lexicon_file, open(
+    #         postings_path, "w", encoding="utf-8"
+    #     ) as postings_file:
+    #         # Sort terms alphabetically for consistent ordering
+    #         for term in sorted(self._postings.keys()):
+    #             postings = self._postings[term]
                 
-                # Sort postings by doc_id
-                postings.sort(key=lambda posting: posting.doc_id)
+    #             # Sort postings by doc_id
+    #             postings.sort(key=lambda posting: posting.doc_id)
                 
-                # Calculate doc_freq: number of unique documents containing this term
-                doc_freq = len(postings)
+    #             # Calculate doc_freq: number of unique documents containing this term
+    #             doc_freq = len(postings)
                 
-                # Format: [{"doc_id": 0, "weighted_tf": 2.5, "raw_tf": 3}, ...]
-                postings_data = [
-                    {
-                        "doc_id": posting.doc_id,
-                        "weighted_tf": posting.weighted_tf,
-                        "raw_tf": posting.raw_tf,
-                        "avg_position": posting.avg_position,
-                    }
-                    for posting in postings
-                ]
-                postings_json = json.dumps(postings_data)
-                offset = postings_file.tell()
-                postings_file.write(postings_json + "\n")
-                length = postings_file.tell() - offset
+    #             # Format: [{"doc_id": 0, "weighted_tf": 2.5, "raw_tf": 3}, ...]
+    #             postings_data = [
+    #                 {
+    #                     "doc_id": posting.doc_id,
+    #                     "weighted_tf": posting.weighted_tf,
+    #                     "raw_tf": posting.raw_tf,
+    #                     "avg_position": posting.avg_position,
+    #                 }
+    #                 for posting in postings
+    #             ]
+    #             postings_json = json.dumps(postings_data)
+    #             offset = postings_file.tell()
+    #             postings_file.write(postings_json + "\n")
+    #             length = postings_file.tell() - offset
 
-                record = {
-                    "term": term,
-                    "doc_freq": doc_freq,  # Number of unique documents containing this term
-                    "offset": offset,  # Character offset in postings.jsonl file
-                    "length": length,  # Length in characters
-                }
-                lexicon_file.write(json.dumps(record) + "\n")
+    #             record = {
+    #                 "term": term,
+    #                 "doc_freq": doc_freq,  # Number of unique documents containing this term
+    #                 "offset": offset,  # Character offset in postings.jsonl file
+    #                 "length": length,  # Length in characters
+    #             }
+    #             lexicon_file.write(json.dumps(record) + "\n")
 
     def _write_metadata(self) -> None:
         lexicon_path = self.output_dir / "lexicon.jsonl"
@@ -235,5 +266,129 @@ class IndexBuilder:
             return 0
         with open(path, "r", encoding="utf-8") as handle:
             return sum(1 for _ in handle)
+        
+    def _dump_partial_index(self) -> None:
+        """Saves current index to file and clears memory"""
+        # Creates the filename for the partial indexes
+        filename = self.output_dir / f"partial_{self.partial_index_count}.jsonl"
+        print(f"  Dumping partial index to {filename}...")
+
+        # Sorts the terms in memory first. Makes merging faster
+        sorted_terms = sorted(self._postings.keys())
+
+        with open(filename, "w", encoding="utf-8") as f:
+            for term in sorted_terms:
+                postings_list = self._postings[term]
+                # Formats the data
+                record = {
+                    "term": term,
+                    "postings": [
+                        {
+                            "doc_id": p.doc_id,
+                            "weighted_tf": p.weighted_tf,
+                            "raw_tf": p.raw_tf,
+                            "avg_position": p.avg_position,
+                        }
+                        for p in postings_list
+                    ]
+                }
+                # One line per term to the disk
+                f.write(json.dumps(record) + "\n")
+
+        # Deletes everything in RAM to continue loading the next partial index
+        self._postings.clear()
+        
+        # Used to produce file names for the partial index with different #s
+        self.partial_index_count += 1
+    
+    def _merge_partial_indexes(self) -> None:
+        """
+        Merges all partial index files into a final one.
+        Opens all of the partial indexes, but only loads the first line of each one instead of loading the whole file for each
+        Then Merges in order as indexes are presorted
+        """
+        print("Merging partial indexes...")
+        
+        # Opens all Files
+        open_files = []
+        for i in range(self.partial_index_count):
+            filename = self.output_dir / f"partial_{i}.jsonl"
+            open_files.append(open(filename, "r", encoding="utf-8"))
+
+        # Holds the top lines from each file
+        current_lines = []
+        
+        # Read first line from evry file
+        for i, file_handle in enumerate(open_files):
+            line = file_handle.readline()
+            if line:
+                data = json.loads(line)
+                # store the term and the data
+                current_lines.append([data["term"], data, i])
+
+        # Output files
+        with open(self.output_dir / "lexicon.jsonl", "w", encoding="utf-8") as lexicon_file, \
+             open(self.output_dir / "postings.jsonl", "w", encoding="utf-8") as postings_file:
+
+            # dumps everything to output files
+            while current_lines:
+                
+                # Finds which one has the smallest term to place in new index
+                current_lines.sort(key=lambda x: x[0])
+                winner_term = current_lines[0][0]
+
+                # Holds all who have the lowest term found as well 
+                combined_postings = []
+                
+                # Holds files that need to grab next line  
+                indices_to_update = []
+
+                # searches through all first lines
+                for card in current_lines:
+                    term = card[0]
+                    data = card[1]
+                    file_index = card[2]
+                    
+                    if term == winner_term:
+                        combined_postings.extend(data["postings"])
+                        indices_to_update.append(file_index)
+                    else:
+                        break
+
+                # sorts by doc id
+                combined_postings.sort(key=lambda x: x["doc_id"])
+                
+                # postings.jsonl
+                postings_str = json.dumps(combined_postings)
+                offset = postings_file.tell() 
+                postings_file.write(postings_str + "\n")
+                length = postings_file.tell() - offset
+
+                # lexicon.jsonl
+                lexicon_record = {
+                    "term": winner_term,
+                    "doc_freq": len(combined_postings),
+                    "offset": offset,
+                    "length": length
+                }
+                lexicon_file.write(json.dumps(lexicon_record) + "\n")
+
+                # gets new lines/terms from each file
+                current_lines = [card for card in current_lines if card[0] != winner_term]
+
+                # Reads new line only from the one that had the lowest term
+                for index in indices_to_update:
+                    line = open_files[index].readline()
+                    if line:
+                        new_data = json.loads(line)
+                        current_lines.append([new_data["term"], new_data, index])
+
+        # closes all the opened partial indexes
+        for f in open_files:
+            f.close()
+            
+        # deletes all the partial indexes to save space
+        for i in range(self.partial_index_count):
+           os.remove(self.output_dir / f"partial_{i}.jsonl")
 
 
