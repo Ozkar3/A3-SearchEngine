@@ -178,3 +178,13 @@ class IndexReader:
             self._postings_file_handle.close()
             self._postings_file_handle = None
 
+    def preload(self) -> None:
+        """Pre-loads all metadata into memory to minimize search time at query"""
+        print("Pre-loading index metadata...")
+        self._load_lexicon()
+        self._load_doc_lookup()
+        self._load_doc_lengths()
+        self._load_doc_lengths() 
+        self.get_num_documents() 
+        print("Pre-loading complete.")
+

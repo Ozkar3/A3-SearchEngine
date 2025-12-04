@@ -28,6 +28,7 @@ class SearchEngine:
         self.index_dir = Path(index_dir)
         self.reader = IndexReader(self.index_dir)
         self.parser = DocumentParser()
+        self.reader.preload()   # loads beforehand all the metadata to help query search time
 
     def search(self, query: str, top_k: int = 5) -> List[SearchResult]:
         """Search for documents matching the query.
