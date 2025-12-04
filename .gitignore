@@ -1,2 +1,7 @@
 DEV/
 developer.zip
+index_output/stats.json
+index_output/postings.jsonl
+index_output/lexicon.jsonl
+index_output/doc_lookup.json
+index_output/doc_lengths.json
