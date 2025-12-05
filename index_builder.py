@@ -83,6 +83,31 @@ class IndexBuilder:
                 files_skipped += 1
                 continue  # skip duplicates that share a URL
 
+            # QUALITY FILTERS
+            if url.endswith("~") or url.endswith(".tmp") or url.endswith(".bak"):
+                files_skipped += 1
+                continue
+
+            # Calendar type sites
+            if "?" in url:
+                files_skipped += 1
+                continue
+            if "calendar" in url.lower() or "events" in url.lower():
+                files_skipped += 1
+                continue
+
+            # Error pages with no useful info
+            html_head = html[:2000].lower()
+            if "404 not found" in html_head or "page not found" in html_head:
+                files_skipped += 1
+                continue
+            if "whoops" in html_head and "trouble locating" in html_head:
+                files_skipped += 1
+                continue
+            if "no news items found" in html_head:
+                files_skipped += 1
+                continue
+
             # ---------- Exact duplicate detection (content-based) ----------
             # Hash the raw HTML content; if we've seen this exact content before,
             # treat this page as an exact duplicate and skip it.
@@ -97,6 +122,10 @@ class IndexBuilder:
             token_stats = self.parser.parse(html)
             tokens: Set[str] = set(token_stats.keys())
 
+            # Skips sites with not many info
+            if len(tokens) < 20:
+                files_skipped += 1
+                continue
             # ---------- Near-duplicate detection (token-based Jaccard) ----------
             # Compare this document's token set against already-indexed docs.
             # If Jaccard similarity is very high, treat it as a near-duplicate.
