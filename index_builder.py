@@ -33,15 +33,23 @@ class IndexBuilder:
         self.doc_lengths: Dict[int, float] = {}
         self.doc_seen_urls: Dict[str, int] = {}
         self._postings: Dict[str, list[Posting]] = defaultdict(list)
+        
+        # N-gram postings
+        self._bigram_postings: Dict[str, list[Posting]] = defaultdict(list)
+        self._trigram_postings: Dict[str, list[Posting]] = defaultdict(list)
+        
+        # Anchor text postings (anchor term -> target doc_id)
+        self._anchor_postings: Dict[str, list[Posting]] = defaultdict(list)
 
         # Deduplication helpers
-        # Map content hash -> representative doc_id for exact duplicate detection
         self._content_hash_to_doc_id: Dict[str, int] = {}
         # Map doc_id -> set of tokens for near-duplicate detection
         self._doc_tokens: Dict[int, Set[str]] = {}
+       
         # Statistics for reporting
         self._exact_duplicate_count: int = 0
         self._near_duplicate_count: int = 0
+      
         # Jaccard similarity threshold for near-duplicates
         self._near_duplicate_threshold: float = 0.9
 
@@ -52,7 +60,6 @@ class IndexBuilder:
         files_processed = 0
         files_skipped = 0
 
-        print("Building index...")
         for file_path in self._iter_corpus_files():
             files_processed += 1
             if files_processed % 100 == 0:
@@ -68,7 +75,7 @@ class IndexBuilder:
 
             if url in self.doc_seen_urls:
                 files_skipped += 1
-                continue  # skip duplicates that share a URL
+                continue 
 
             # ---------- Exact duplicate detection (content-based) ----------
             # Hash the raw HTML content; if we've seen this exact content before,
@@ -79,8 +86,7 @@ class IndexBuilder:
                 files_skipped += 1
                 continue
 
-            # Parse and extract token statistics once (used for both indexing
-            # and near-duplicate detection).
+            # Parse and extract token statistics once 
             token_stats = self.parser.parse(html)
             tokens: Set[str] = set(token_stats.keys())
 
@@ -106,10 +112,12 @@ class IndexBuilder:
                 files_skipped += 1
                 continue
 
-            # At this point, the document is unique enough to index.
             self.doc_lookup[doc_id] = url
             self.doc_seen_urls[url] = doc_id
 
+            token_stats, bigram_stats, trigram_stats, anchor_tokens, outbound_urls = self.parser.parse_with_extras(html)
+
+            # Index regular tokens
             length = 0.0
             for term, stats in token_stats.items():
                 posting = Posting(
@@ -123,9 +131,38 @@ class IndexBuilder:
                 term_tf = 1.0 + math.log(1.0 + stats.weighted_tf)
                 length += term_tf * term_tf
 
+            # Index bigrams
+            for bigram, stats in bigram_stats.items():
+                posting = Posting(
+                    doc_id=doc_id,
+                    weighted_tf=stats.weighted_tf,
+                    raw_tf=stats.raw_tf,
+                    avg_position=self._average(stats.positions),
+                )
+                self._bigram_postings[bigram].append(posting)
+
+            # Index trigrams
+            for trigram, stats in trigram_stats.items():
+                posting = Posting(
+                    doc_id=doc_id,
+                    weighted_tf=stats.weighted_tf,
+                    raw_tf=stats.raw_tf,
+                    avg_position=self._average(stats.positions),
+                )
+                self._trigram_postings[trigram].append(posting)
+
+            # Index anchor text
+            for anchor_term in anchor_tokens:
+                posting = Posting(
+                    doc_id=doc_id,
+                    weighted_tf=2.0, 
+                    raw_tf=1,
+                    avg_position=0.0,
+                )
+                self._anchor_postings[anchor_term].append(posting)
+
             self.doc_lengths[doc_id] = max(length, 1e-9)
 
-            # Record deduplication metadata only for documents we actually index.
             self._content_hash_to_doc_id[content_hash] = doc_id
             self._doc_tokens[doc_id] = tokens
             doc_id += 1
@@ -140,6 +177,10 @@ class IndexBuilder:
         )
         print("  Writing index...")
         self._write_index()
+        print("  Writing n-gram indexes...")
+        self._write_ngram_indexes()
+        print("  Writing anchor text index...")
+        self._write_anchor_index()
         print("  Writing metadata...")
         self._write_metadata()
 
@@ -150,7 +191,6 @@ class IndexBuilder:
         Each domain folder contains multiple JSON files (one per web page).
         Processes all folders in the corpus.
         """
-        # Get all immediate subdirectories (domain folders like aiclub_ics_uci_edu)
         domain_folders = []
         try:
             for item in self.corpus_root.iterdir():
@@ -185,14 +225,12 @@ class IndexBuilder:
         
         print(f"Found {total_json_files} JSON files across {len(selected_folders)} domain folders")
         
-        # Iterate through JSON files in all folders
         for folder in selected_folders:
             try:
                 for filename in folder.iterdir():
                     if filename.is_file() and filename.suffix.lower() == ".json":
                         yield filename
             except (OSError, PermissionError):
-                # Skip folders we can't read
                 continue
 
     def _load_document(self, path: Path) -> Dict[str, str] | None:
@@ -210,14 +248,12 @@ class IndexBuilder:
         with open(lexicon_path, "w", encoding="utf-8") as lexicon_file, open(
             postings_path, "w", encoding="utf-8"
         ) as postings_file:
-            # Sort terms alphabetically for consistent ordering
             for term in sorted(self._postings.keys()):
                 postings = self._postings[term]
                 
                 # Sort postings by doc_id
                 postings.sort(key=lambda posting: posting.doc_id)
                 
-                # Calculate doc_freq: number of unique documents containing this term
                 doc_freq = len(postings)
                 
                 # Format: [{"doc_id": 0, "weighted_tf": 2.5, "raw_tf": 3}, ...]
@@ -242,6 +278,110 @@ class IndexBuilder:
                     "length": length,  # Length in characters
                 }
                 lexicon_file.write(json.dumps(record) + "\n")
+
+    def _write_ngram_indexes(self) -> None:
+        """Write bigram and trigram indexes."""
+        bigram_lexicon_path = self.output_dir / "bigram_lexicon.jsonl"
+        bigram_postings_path = self.output_dir / "bigram_postings.jsonl"
+        trigram_lexicon_path = self.output_dir / "trigram_lexicon.jsonl"
+        trigram_postings_path = self.output_dir / "trigram_postings.jsonl"
+
+        # Write bigrams
+        with open(bigram_lexicon_path, "w", encoding="utf-8") as lexicon_file, open(
+            bigram_postings_path, "w", encoding="utf-8"
+        ) as postings_file:
+            for term in sorted(self._bigram_postings.keys()):
+                postings = sorted(self._bigram_postings[term], key=lambda p: p.doc_id)
+                postings_data = [
+                    {
+                        "doc_id": p.doc_id,
+                        "weighted_tf": p.weighted_tf,
+                        "raw_tf": p.raw_tf,
+                        "avg_position": p.avg_position,
+                    }
+                    for p in postings
+                ]
+                postings_json = json.dumps(postings_data)
+                offset = postings_file.tell()
+                postings_file.write(postings_json + "\n")
+                length = postings_file.tell() - offset
+                lexicon_file.write(
+                    json.dumps(
+                        {
+                            "term": term,
+                            "doc_freq": len(postings),
+                            "offset": offset,
+                            "length": length,
+                        }
+                    )
+                    + "\n"
+                )
+
+        # Write trigrams
+        with open(trigram_lexicon_path, "w", encoding="utf-8") as lexicon_file, open(
+            trigram_postings_path, "w", encoding="utf-8"
+        ) as postings_file:
+            for term in sorted(self._trigram_postings.keys()):
+                postings = sorted(self._trigram_postings[term], key=lambda p: p.doc_id)
+                postings_data = [
+                    {
+                        "doc_id": p.doc_id,
+                        "weighted_tf": p.weighted_tf,
+                        "raw_tf": p.raw_tf,
+                        "avg_position": p.avg_position,
+                    }
+                    for p in postings
+                ]
+                postings_json = json.dumps(postings_data)
+                offset = postings_file.tell()
+                postings_file.write(postings_json + "\n")
+                length = postings_file.tell() - offset
+                lexicon_file.write(
+                    json.dumps(
+                        {
+                            "term": term,
+                            "doc_freq": len(postings),
+                            "offset": offset,
+                            "length": length,
+                        }
+                    )
+                    + "\n"
+                )
+
+    def _write_anchor_index(self) -> None:
+        """Write anchor text index."""
+        anchor_lexicon_path = self.output_dir / "anchor_lexicon.jsonl"
+        anchor_postings_path = self.output_dir / "anchor_postings.jsonl"
+
+        with open(anchor_lexicon_path, "w", encoding="utf-8") as lexicon_file, open(
+            anchor_postings_path, "w", encoding="utf-8"
+        ) as postings_file:
+            for term in sorted(self._anchor_postings.keys()):
+                postings = sorted(self._anchor_postings[term], key=lambda p: p.doc_id)
+                postings_data = [
+                    {
+                        "doc_id": p.doc_id,
+                        "weighted_tf": p.weighted_tf,
+                        "raw_tf": p.raw_tf,
+                        "avg_position": p.avg_position,
+                    }
+                    for p in postings
+                ]
+                postings_json = json.dumps(postings_data)
+                offset = postings_file.tell()
+                postings_file.write(postings_json + "\n")
+                length = postings_file.tell() - offset
+                lexicon_file.write(
+                    json.dumps(
+                        {
+                            "term": term,
+                            "doc_freq": len(postings),
+                            "offset": offset,
+                            "length": length,
+                        }
+                    )
+                    + "\n"
+                )
 
     def _write_metadata(self) -> None:
         lexicon_path = self.output_dir / "lexicon.jsonl"

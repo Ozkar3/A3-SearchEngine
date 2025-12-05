@@ -200,7 +200,7 @@ class SearchRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def log_message(self, format: str, *args) -> None
+    def log_message(self, format: str, *args) -> None:
         """Silence default logging to keep console clean."""
         return
 

@@ -43,13 +43,24 @@ class IndexReader:
         self.stats_path = self.index_dir / "stats.json"
 
         # Cache for lexicon entries (term -> LexiconEntry)
-        # This is small compared to postings, so we can load it
         self._lexicon_cache: Optional[Dict[str, LexiconEntry]] = None
 
-        # Cache for doc_lookup and doc_lengths (loaded once)
         self._doc_lookup: Optional[Dict[int, str]] = None
         self._doc_lengths: Optional[Dict[int, float]] = None
         self._num_documents: Optional[int] = None
+
+        # N-gram lexicons and postings paths
+        self.bigram_lexicon_path = self.index_dir / "bigram_lexicon.jsonl"
+        self.bigram_postings_path = self.index_dir / "bigram_postings.jsonl"
+        self.trigram_lexicon_path = self.index_dir / "trigram_lexicon.jsonl"
+        self.trigram_postings_path = self.index_dir / "trigram_postings.jsonl"
+        self.anchor_lexicon_path = self.index_dir / "anchor_lexicon.jsonl"
+        self.anchor_postings_path = self.index_dir / "anchor_postings.jsonl"
+
+        # Cache for n-gram lexicons
+        self._bigram_lexicon_cache: Optional[Dict[str, LexiconEntry]] = None
+        self._trigram_lexicon_cache: Optional[Dict[str, LexiconEntry]] = None
+        self._anchor_lexicon_cache: Optional[Dict[str, LexiconEntry]] = None
 
         # File handle for postings file (opened on demand)
         self._postings_file_handle: Optional = None
@@ -124,14 +135,9 @@ class IndexReader:
         entry = lexicon[term]
 
         # Read postings from disk using offset and length
-        # Note: offset and length are in bytes/characters (UTF-8, ASCII-safe)
-        # Each term's postings are on a single line in the JSONL file
         with open(self.postings_path, "r", encoding="utf-8") as f:
             f.seek(entry.offset)
-            # Read exactly one line (each term's postings are on one line)
-            # Use readline() to read until newline, then verify we got the right amount
             postings_json = f.readline()
-            # Remove trailing newline
             postings_json = postings_json.rstrip('\n\r')
 
         postings_data = json.loads(postings_json)
@@ -171,6 +177,96 @@ class IndexReader:
             return 0.0
         num_docs = self.get_num_documents()
         return math.log(num_docs / doc_freq)
+
+    def _load_ngram_lexicon(self, lexicon_path: Path, cache_attr: str) -> Dict[str, LexiconEntry]:
+        """Generic method to load n-gram lexicon."""
+        cache = getattr(self, cache_attr)
+        if cache is not None:
+            return cache
+
+        lexicon: Dict[str, LexiconEntry] = {}
+        if lexicon_path.exists():
+            with open(lexicon_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    record = json.loads(line)
+                    entry = LexiconEntry(
+                        term=record["term"],
+                        doc_freq=record["doc_freq"],
+                        offset=record["offset"],
+                        length=record["length"],
+                    )
+                    lexicon[entry.term] = entry
+        setattr(self, cache_attr, lexicon)
+        return lexicon
+
+    def get_bigram_postings(self, bigram: str) -> List[Posting]:
+        """Get postings for a bigram."""
+        lexicon = self._load_ngram_lexicon(self.bigram_lexicon_path, "_bigram_lexicon_cache")
+        if bigram not in lexicon:
+            return []
+        entry = lexicon[bigram]
+        with open(self.bigram_postings_path, "r", encoding="utf-8") as f:
+            f.seek(entry.offset)
+            postings_json = f.readline().rstrip('\n\r')
+        postings_data = json.loads(postings_json)
+        return [
+            Posting(
+                doc_id=p["doc_id"],
+                weighted_tf=p["weighted_tf"],
+                raw_tf=p["raw_tf"],
+                avg_position=p["avg_position"],
+            )
+            for p in postings_data
+        ]
+
+    def get_trigram_postings(self, trigram: str) -> List[Posting]:
+        """Get postings for a trigram."""
+        lexicon = self._load_ngram_lexicon(self.trigram_lexicon_path, "_trigram_lexicon_cache")
+        if trigram not in lexicon:
+            return []
+        entry = lexicon[trigram]
+        with open(self.trigram_postings_path, "r", encoding="utf-8") as f:
+            f.seek(entry.offset)
+            postings_json = f.readline().rstrip('\n\r')
+        postings_data = json.loads(postings_json)
+        return [
+            Posting(
+                doc_id=p["doc_id"],
+                weighted_tf=p["weighted_tf"],
+                raw_tf=p["raw_tf"],
+                avg_position=p["avg_position"],
+            )
+            for p in postings_data
+        ]
+
+    def get_anchor_postings(self, term: str) -> List[Posting]:
+        """Get postings for anchor text term."""
+        lexicon = self._load_ngram_lexicon(self.anchor_lexicon_path, "_anchor_lexicon_cache")
+        if term not in lexicon:
+            return []
+        entry = lexicon[term]
+        with open(self.anchor_postings_path, "r", encoding="utf-8") as f:
+            f.seek(entry.offset)
+            postings_json = f.readline().rstrip('\n\r')
+        postings_data = json.loads(postings_json)
+        return [
+            Posting(
+                doc_id=p["doc_id"],
+                weighted_tf=p["weighted_tf"],
+                raw_tf=p["raw_tf"],
+                avg_position=p["avg_position"],
+            )
+            for p in postings_data
+        ]
+
+    def get_term_positions(self, term: str, doc_id: int) -> List[int]:
+        """Get positions of a term in a document (for proximity scoring).
+        """
+        postings = self.get_postings(term)
+        for posting in postings:
+            if posting.doc_id == doc_id:
+                return [int(posting.avg_position)] if posting.avg_position > 0 else []
+        return []
 
     def close(self) -> None:
         """Close any open file handles."""
