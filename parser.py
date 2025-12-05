@@ -56,10 +56,20 @@ class DocumentParser:
 
         def process_text(text: str, boost: float) -> None:
             nonlocal position
-            for token in self._tokenize(text):
+            tokens = list(self._tokenize(text)) 
+            # index single tokens
+            for token in tokens:
                 stem = self._stemmer.stem(token)
                 position += 1
                 entry = stats.setdefault(stem, TokenStats())
+                entry.raw_tf += 1
+                entry.weighted_tf += boost
+                entry.positions.append(position)
+
+            stemmed_tokens = [self._stemmer.stem(t) for t in tokens]
+
+            for bigram in self._generate_ngrams(stemmed_tokens, 2):
+                entry = stats.setdefault(bigram, TokenStats())
                 entry.raw_tf += 1
                 entry.weighted_tf += boost
                 entry.positions.append(position)
@@ -87,5 +97,13 @@ class DocumentParser:
         for token in tokens:
             if alphanumeric_pattern.match(token):
                 yield token
+
+    def _generate_ngrams(self, tokens: List[str], n: int) -> Iterator[str]:
+        """n-gram tokens from a list of tokens"""
+        if len(tokens) < n:
+            return
+        for i in range(len(tokens) - n + 1):
+            # relates 2 words
+            yield " ".join(tokens[i : i + n])
 
 

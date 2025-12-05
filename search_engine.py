@@ -44,6 +44,10 @@ class SearchEngine:
         query_terms = self._parse_query(query)
         if not query_terms:
             return []
+        
+        query_bigrams = []
+        for bigram in self.parser._generate_ngrams(query_terms, 2):
+            query_bigrams.append(bigram)
 
         # Get postings for each query term
         term_postings = {}
@@ -59,9 +63,15 @@ class SearchEngine:
         if not candidate_docs:
             return []
 
-        # Score documents using tf-idf
-        scored_results = self._score_documents(candidate_docs, term_postings, query_terms)
+        all_scoring_terms = query_terms.copy()
+        for bigram in query_bigrams:
+            postings = self.reader.get_postings(bigram)
+            if postings:
+                term_postings[bigram] = postings
+                all_scoring_terms.append(bigram)
 
+        # Score documents using tf-idf single and bi grams
+        scored_results = self._score_documents(candidate_docs, term_postings, all_scoring_terms)    
         # Sort by score (descending) and return top K
         scored_results.sort(key=lambda r: r.score, reverse=True)
         return scored_results[:top_k]
