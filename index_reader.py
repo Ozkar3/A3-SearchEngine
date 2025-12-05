@@ -10,7 +10,6 @@ from typing import Dict, List, Optional
 
 from parser import DocumentParser
 
-
 @dataclass
 class LexiconEntry:
     """Represents a lexicon entry for a term."""
